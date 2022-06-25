@@ -11,10 +11,11 @@ import * as route53 from 'aws-cdk-lib/aws-route53'
 import * as ses from 'aws-cdk-lib/aws-ses'
 import * as iam from 'aws-cdk-lib/aws-iam'
 
-import config from '../config.json'
+import config from '../src/config.json'
 
 import { VerifySesDomain, VerifySesEmailAddress } from '@seeebiii/ses-verify-identities'
 import { assert } from 'console'
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs'
 
 // https://github.com/seeebiii/ses-verify-identities
 
@@ -38,12 +39,13 @@ export class AwsLambdaSesForwarderCdkStack extends Stack {
     const domainName = this.node.tryGetContext('domain')
     const bucketName = `ses-forwarder-${this.node.tryGetContext('domain').replace('.', '-')}`
 
-    const forwarder: lambda.Function = new lambda.Function(this, 'forwarder', {
+    const forwarder = new NodejsFunction(this, 'forwarder', {
       runtime: lambda.Runtime.NODEJS_16_X,
       memorySize: 512, // size guidance https://github.com/arithmetric/aws-lambda-ses-forwarder
       timeout: cdk.Duration.seconds(30),
-      handler: 'forwarder.handler',
-      code: lambda.Code.fromAsset('src/', { exclude: ['*.ts'] }),
+      handler: 'handler',
+      //code: lambda.Code.fromAsset('src/', { exclude: ['*.ts'] }),
+      entry: path.join(__dirname, '../src/forwarder.ts'),
       environment: {
         REGION: cdk.Stack.of(this).region,
         AVAILABILITY_ZONES: JSON.stringify(cdk.Stack.of(this).availabilityZones),

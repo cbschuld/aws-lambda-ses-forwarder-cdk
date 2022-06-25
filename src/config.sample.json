@@ -3,6 +3,7 @@
   "subjectPrefix": "",
   "emailKeyPrefix": "",
   "allowPlusSign": true,
+  "rejectSpam": true,
   "forwardMapping": {
     "info@example.com": ["example.john@example.com", "example.jen@example.com"],
     "abuse@example.com": ["example.jim@example.com"],

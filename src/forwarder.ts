@@ -1,9 +1,9 @@
 'use strict'
 
 import { S3, SES } from 'aws-sdk'
-import { SESEvent, SESHandler, SESMessage } from 'aws-lambda'
+import { SESEvent, SESHandler, SESMessage, SESReceipt, SESReceiptStatus } from 'aws-lambda'
 import assert from 'assert'
-import config from '../config.json'
+import config from './config.json'
 import Log from 'lambda-tree'
 
 interface ForwarderConfig {
@@ -12,6 +12,7 @@ interface ForwarderConfig {
   emailKeyPrefix: string
   forwardMapping: { [key: string]: string[] }
   allowPlusSign: boolean
+  rejectSpam: boolean
 }
 
 const CONFIG: ForwarderConfig = {
@@ -20,14 +21,15 @@ const CONFIG: ForwarderConfig = {
     subjectPrefix: '',
     emailKeyPrefix: '',
     allowPlusSign: true,
-    forwardMapping: {}
+    forwardMapping: {},
+    rejectSpam: true
   },
   ...config
 }
 
 const s3 = new S3()
 const ses = new SES()
-const log = new Log()
+const log = new Log<object>()
 
 /**
  * Send email using the SES sendRawEmail command.
@@ -57,8 +59,8 @@ const sendMessage = async (
       ', '
     )}. Transformed recipients: ${updatedRecipients.join(', ')}.`
   )
-  return new Promise(function (resolve, reject) {
-    ses.sendRawEmail(params, function (err, result) {
+  return new Promise((resolve, reject) => {
+    ses.sendRawEmail(params, (err, result) => {
       if (err) {
         log.error('sendRawEmail() returned error.', {
           error: err,
@@ -66,10 +68,33 @@ const sendMessage = async (
         })
         return reject(new Error('Error: Email sending failed.'))
       }
-      log.info('sendRawEmail() successful.', { result: result })
+      log.info('sendRawEmail() successful.', { result })
       resolve(true)
     })
   })
+}
+
+/**
+ * Filters out SPAM emails
+ *
+ * @param {SESMessage} message - SES message
+ *
+ * @return {Promise<boolean>} - true if email should still be sent
+ */
+const filterSpam = (message: SESMessage): Promise<boolean> => {
+  const receipt = message.receipt
+  if (CONFIG.rejectSpam && receipt) {
+    const verdicts = ['spamVerdict', 'virusVerdict', 'spfVerdict', 'dkimVerdict', 'dmarcVerdict']
+    for (let key of verdicts) {
+      const verdict: SESReceiptStatus = receipt[key as keyof SESReceipt] as SESReceiptStatus
+      if (verdict && verdict.status === 'FAIL') {
+        log.error('Error: Email failed spam filter: ' + key)
+        return Promise.reject(false)
+      }
+    }
+  }
+
+  return Promise.resolve(true)
 }
 
 /**
@@ -234,43 +259,37 @@ const parseEvent = (event: SESEvent): Promise<SESMessage> => {
     event.Records[0].eventSource !== 'aws:ses' ||
     event.Records[0].eventVersion !== '1.0'
   ) {
-    log.info('parseEvent() received invalid SES message:', {
-      level: 'error',
-      event: JSON.stringify(event)
-    })
+    log.error('parseEvent() received invalid SES message:', { event })
     return Promise.reject(new Error('Error: Received invalid SES message.'))
   }
   return Promise.resolve(event.Records[0].ses)
 }
 
 export const handler: SESHandler = async (event) => {
-  log.info('[event]', event)
-  log.info('[event.Records[0]]', event.Records[0])
-  log.info('[event.Records[0].ses]', event.Records[0].ses)
-  log.info('[event.Records[0].ses.receipt]', event.Records[0].ses.receipt)
-
   return parseEvent(event)
     .then(async (message) => {
-      log.info('[message]', message)
       const { original, recipients } = transformRecipients(message)
-      log.info('[original]', original)
-      log.info('[recipients]', recipients)
-      return fetchMessage(message)
-        .then(async (messageBody) => {
-          log.info('[messageBody]', messageBody)
-          assert(messageBody, 'Message body is not defined')
-          const updatedMessageBody = processMessage(original, messageBody || '')
-          return sendMessage(original, message.receipt.recipients, recipients, updatedMessageBody)
-            .then((success) => {
-              log.info('[sendMessage]', success)
+
+      return filterSpam(message).then((filtered) => {
+        if (filtered) {
+          return fetchMessage(message)
+            .then(async (messageBody) => {
+              assert(messageBody, 'Message body is not defined')
+              const updatedMessageBody = processMessage(original, messageBody || '')
+              return sendMessage(original, message.receipt.recipients, recipients, updatedMessageBody)
+                .then((success) => {
+                  log.info('[sendMessage]', { success })
+                })
+                .catch((err) => {
+                  log.error('[sendMessage]', { err })
+                })
             })
             .catch((err) => {
-              log.error('[sendMessage]', err)
+              log.error('[fetchMessage]', { err })
             })
-        })
-        .catch((err) => {
-          log.error('[fetchMessage]', err)
-        })
+        }
+        return
+      })
     })
     .catch((err) => {
       log.error('[parseEvent]', { err })

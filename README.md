@@ -12,7 +12,7 @@ Actions to get SES Forwarding correctly on your domain:
 
 - The first step is to make sure you have the [AWS CDK installed](https://docs.aws.amazon.com/cdk/v2/guide/getting_started.html)
 - Clone or download this project
-- Copy `config.sample.json` to `config.json` and update the file with parameters relative to your installation. _(the same parameter's as [Joe Turgeon](https://github.com/arithmetric) solution)_
+- Copy `src/config.sample.json` to `src/config.json` and update the file with parameters relative to your installation. _(the same parameter's as [Joe Turgeon](https://github.com/arithmetric) solution)_
 - Deploy using the CDK _(see below for examples)_
 - Enable the Ruleset _(the CDK does not allow this... read below how to do this quickly)(if this changes in the future I'll automate this)_
 
@@ -23,6 +23,7 @@ Expected keys/values:
 - **fromEmail**: Forwarded emails will come from this verified address
 - **subjectPrefix**: Forwarded emails subject will contain this prefix
 - **emailBucket**: S3 bucket name where SES stores emails.
+- **rejectSpam**: Do not FWD email on which AWS detected as SPAM
 - **emailKeyPrefix**: S3 key name prefix where SES stores email. Include the trailing slash.
 - **allowPlusSign**: Enables support for plus sign suffixes on email addresses. If set to `true`, the username/mailbox part of an email address is parsed to remove anything after a plus sign. For example, an email sent to `example+test@example.com` would be treated as if it was sent to `example@example.com`.
 - **forwardMapping**: Object where the key is the lowercase email address from which to forward and the value is an array of email addresses to which to send the message.
@@ -73,3 +74,7 @@ aws cloudformation delete-stack --stack-name CDKToolkit
 aws s3 ls | grep -i cdk
 aws s3 rb --force s3://cdk-XXXX-assets-XXXXX-REGION
 ```
+
+## Credits
+
+Based on the work of [Joe Turgeon](https://github.com/arithmetric/aws-lambda-ses-forwarder) [@eleven41 and @mwhouser](https://github.com/eleven41/aws-lambda-send-ses-email)

@@ -39,6 +39,8 @@ Expected keys/values:
 Deploy via the CDK using the CDK's cli. You will need to know your **AWS account ID**, the **region** you want to deploy the solution on and your receiving **domain**. You may need to add a named profile _(if you use them)_ or set your AWS keys up in the environment ([see the **Prerequisites** section of the CDK page](https://docs.aws.amazon.com/cdk/v2/guide/getting_started.html))
 
 ```sh
+npm install
+npm run build
 cdk deploy -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
 
 ```

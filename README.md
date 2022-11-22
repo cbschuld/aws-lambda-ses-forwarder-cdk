@@ -41,6 +41,8 @@ Deploy via the CDK using the CDK's cli. You will need to know your **AWS account
 ```sh
 npm install
 npm run build
+# if you have not does a CDK bootstrap; run the following:
+cdk bootstrap -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
 cdk deploy -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
 
 ```

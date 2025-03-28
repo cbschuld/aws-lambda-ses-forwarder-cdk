@@ -19,7 +19,7 @@
     "inlineSources": true,
     "experimentalDecorators": true,
     "strictPropertyInitialization": false,
-    "typeRoots": ["./node_modules/@types"]
+    "skipLibCheck": true
   },
   "exclude": ["node_modules", "cdk.out"]
 }

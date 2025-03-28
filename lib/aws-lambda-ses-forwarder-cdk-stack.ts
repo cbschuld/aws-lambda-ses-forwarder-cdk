@@ -1,54 +1,38 @@
-import { Stack, StackProps } from 'aws-cdk-lib'
+import {
+  Stack,
+  StackProps,
+  Duration,
+  CfnOutput,
+  aws_s3 as s3,
+  aws_lambda as lambda,
+  aws_route53 as route53,
+  aws_ses as ses,
+  aws_iam as iam
+} from 'aws-cdk-lib'
 import { Construct } from 'constructs'
-
-import * as s3 from 'aws-cdk-lib/aws-s3'
-import * as s3n from 'aws-cdk-lib/aws-s3-notifications'
-import * as lambda from 'aws-cdk-lib/aws-lambda'
-import * as cdk from 'aws-cdk-lib'
 import * as path from 'path'
 import * as actions from 'aws-cdk-lib/aws-ses-actions'
-import * as route53 from 'aws-cdk-lib/aws-route53'
-import * as ses from 'aws-cdk-lib/aws-ses'
-import * as iam from 'aws-cdk-lib/aws-iam'
-
-import config from '../src/config.json'
-
-import { VerifySesDomain, VerifySesEmailAddress } from '@seeebiii/ses-verify-identities'
-import { assert } from 'console'
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs'
+import config from '../src/config.json'
+import { VerifySesDomain, VerifySesEmailAddress } from '@seeebiii/ses-verify-identities'
 
-// https://github.com/seeebiii/ses-verify-identities
-
-// Ruleset cannot be activated via CDK
-// https://github.com/aws/aws-cdk/issues/10321
-//
-// enable with:
-// aws ses set-active-receipt-rule-set --rule-set-name SesForwarderRuleSet-anticipated-io --profile=anticipated --region=us-west-2
-//
-// disable with:
-// aws ses set-active-receipt-rule-set --profile=anticipated --region=us-west-2
-
-//
-//
-//
-//
 export class AwsLambdaSesForwarderCdkStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props)
 
     const domainName = this.node.tryGetContext('domain')
-    const bucketName = `ses-forwarder-${this.node.tryGetContext('domain').replace('.', '-')}`
+    const bucketName = `ses-forwarder-${domainName.replace('.', '-')}`
 
     const forwarder = new NodejsFunction(this, 'forwarder', {
-      runtime: lambda.Runtime.NODEJS_16_X,
-      memorySize: 512, // size guidance https://github.com/arithmetric/aws-lambda-ses-forwarder
-      timeout: cdk.Duration.seconds(30),
+      runtime: lambda.Runtime.NODEJS_LATEST, // Updated runtime
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.seconds(30),
       handler: 'handler',
-      //code: lambda.Code.fromAsset('src/', { exclude: ['*.ts'] }),
       entry: path.join(__dirname, '../src/forwarder.ts'),
       environment: {
-        REGION: cdk.Stack.of(this).region,
-        AVAILABILITY_ZONES: JSON.stringify(cdk.Stack.of(this).availabilityZones),
+        REGION: Stack.of(this).region,
+        AVAILABILITY_ZONES: JSON.stringify(Stack.of(this).availabilityZones),
         DOMAIN: domainName,
         BUCKET: bucketName
       }
@@ -58,7 +42,7 @@ export class AwsLambdaSesForwarderCdkStack extends Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ses:SendEmail', 'ses:SendRawEmail'],
-        resources: [`arn:aws:ses:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:identity/*`]
+        resources: [`arn:aws:ses:${Stack.of(this).region}:${Stack.of(this).account}:identity/*`]
       })
     )
 
@@ -72,7 +56,6 @@ export class AwsLambdaSesForwarderCdkStack extends Stack {
     new VerifySesDomain(this, 'SesDomainVerification', { domainName })
 
     const emails: string[] = Object.values(config.forwardMapping).flat()
-
     emails.forEach((emailAddress, index) => {
       new VerifySesEmailAddress(this, `SesEmailVerification${index}`, { emailAddress })
     })
@@ -83,7 +66,7 @@ export class AwsLambdaSesForwarderCdkStack extends Stack {
 
     const receiptRuleSetName = `SesForwarderRuleSet-${domainName.replace('.', '-')}`
 
-    new cdk.CfnOutput(this, 'SESRuleSetName', {
+    new CfnOutput(this, 'SESRuleSetName', {
       value: receiptRuleSetName,
       exportName: 'SESRuleSetName'
     })
@@ -112,12 +95,12 @@ export class AwsLambdaSesForwarderCdkStack extends Stack {
     new route53.MxRecord(this, 'MxRecord', {
       values: [
         {
-          hostName: `inbound-smtp.${cdk.Stack.of(this).region}.amazonaws.com`,
+          hostName: `inbound-smtp.${Stack.of(this).region}.amazonaws.com`,
           priority: 10
         }
       ],
       zone: hostedZone,
-      ttl: cdk.Duration.minutes(30)
+      ttl: Duration.minutes(30)
     })
   }
 }

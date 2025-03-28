@@ -1,12 +1,10 @@
 # SES Forwarding via CDK ✉️
 
-The SES forwarding system allows you to have domain receive email via AWS SES and forward to another email account.
+Easily forward email from one domain to another. As an example this let's you forward email from one domain to a Gmail account or any other provider. The SES forwarding system allows you to have your domain receive email via AWS SES and forward to another email account.
 
-## Special Thanks
+This uses the v2 of the AWS SDK.
 
-Special thanks to [Joe Turgeon](https://github.com/arithmetric) for doing the original lift here. This is an adapted version of his [SES Email Fowarder](https://github.com/arithmetric/aws-lambda-ses-forwarder) modified to TypeScript and then bootstrapped with the AWS CDK.
-
-## Using for your domain
+## Prerequisite: Using for your domain
 
 Actions to get SES Forwarding correctly on your domain:
 
@@ -16,7 +14,7 @@ Actions to get SES Forwarding correctly on your domain:
 - Deploy using the CDK _(see below for examples)_
 - Enable the Ruleset _(the CDK does not allow this... read below how to do this quickly)(if this changes in the future I'll automate this)_
 
-## config.json
+## Copy / Setup your `config.json`
 
 Expected keys/values:
 
@@ -38,16 +36,19 @@ Expected keys/values:
 
 Deploy via the CDK using the CDK's cli. You will need to know your **AWS account ID**, the **region** you want to deploy the solution on and your receiving **domain**. You may need to add a named profile _(if you use them)_ or set your AWS keys up in the environment ([see the **Prerequisites** section of the CDK page](https://docs.aws.amazon.com/cdk/v2/guide/getting_started.html))
 
-```sh
-npm install
-npm run build
-# if you have not does a CDK bootstrap; run the following:
-cdk bootstrap -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
-cdk deploy -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
+### Deploy - STEP 1 of 2
 
+You can also add an AWS profile to it by adding `--profile=PROFILE_NAME`
+
+```sh
+pnpm install
+pnpm run build
+# if you have not does a CDK bootstrap; run the following:
+pnpm run cdk:bootstrap -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
+pnpm run cdk:deploy -c account=1234567890 -c domain=mydomain.com -c region=us-west-2
 ```
 
-## Enable the Ruleset
+## Enable the Ruleset - STEP 2 of 2
 
 You cannot activate an SES Ruleset from the CDK 👎 so...
 
@@ -79,6 +80,6 @@ aws s3 ls | grep -i cdk
 aws s3 rb --force s3://cdk-XXXX-assets-XXXXX-REGION
 ```
 
-## Credits
+## Credit and Special Thanks
 
-Based on the work of [Joe Turgeon](https://github.com/arithmetric/aws-lambda-ses-forwarder) [@eleven41 and @mwhouser](https://github.com/eleven41/aws-lambda-send-ses-email)
+Special thanks to [Joe Turgeon](https://github.com/arithmetric) for doing the original lift here. This is an adapted version of his [SES Email Fowarder](https://github.com/arithmetric/aws-lambda-ses-forwarder) modified to TypeScript and then bootstrapped with the AWS CDK. Thus, this is based on the work of [Joe Turgeon](https://github.com/arithmetric/aws-lambda-ses-forwarder) [@eleven41 and @mwhouser](https://github.com/eleven41/aws-lambda-send-ses-email)

@@ -9,3 +9,4 @@ cdk.out
 
 # config for the forwarder
 config.json
+cdk.context.json

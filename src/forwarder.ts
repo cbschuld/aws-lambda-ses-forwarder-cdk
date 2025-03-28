@@ -1,10 +1,10 @@
-'use strict'
-
-import { S3, SES } from 'aws-sdk'
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+import { SESClient, SendRawEmailCommand, SendRawEmailCommandInput } from '@aws-sdk/client-ses'
 import { SESEvent, SESHandler, SESMessage, SESReceipt, SESReceiptStatus } from 'aws-lambda'
 import assert from 'assert'
 import config from './config.json'
 import Log from 'lambda-tree'
+import { Readable } from 'stream'
 
 interface ForwarderConfig {
   fromEmail: string
@@ -27,19 +27,22 @@ const CONFIG: ForwarderConfig = {
   ...config
 }
 
-const s3 = new S3()
-const ses = new SES()
+const s3 = new S3Client({})
+const ses = new SESClient({})
 const log = new Log<object>()
+
+// Utility to convert ReadableStream to string
+async function streamToString(stream: Readable): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+    stream.on('error', reject)
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
+  })
+}
 
 /**
  * Send email using the SES sendRawEmail command.
- *
- * @param {string} originalRecipient - original email recipient
- * @param {string[]} originalRecipients - list of original email recipients
- * @param {string[]} updatedRecipients - list of updated email recipients
- * @param {string} messageBody - the message body
- *
- * @return {boolean} - Promise resolved with data.
  */
 const sendMessage = async (
   originalRecipient: string,
@@ -47,144 +50,140 @@ const sendMessage = async (
   updatedRecipients: string[],
   messageBody: string
 ): Promise<boolean> => {
-  var params = {
-    Destinations: updatedRecipients,
-    Source: originalRecipient,
-    RawMessage: {
-      Data: messageBody
+  try {
+    const params: SendRawEmailCommandInput = {
+      Destinations: updatedRecipients, // e.g., ['cbschuld@gmail.com']
+      Source: CONFIG.fromEmail, // Use verified SES identity, e.g., 'noreply@urlpinch.com'
+      RawMessage: { Data: Buffer.from(messageBody) }
     }
-  }
-  log.info(
-    `sendMessage: Sending email via SES. Original recipients: ${originalRecipients.join(
-      ', '
-    )}. Transformed recipients: ${updatedRecipients.join(', ')}.`
-  )
-  return new Promise((resolve, reject) => {
-    ses.sendRawEmail(params, (err, result) => {
-      if (err) {
-        log.error('sendRawEmail() returned error.', {
-          error: err,
-          stack: err.stack
-        })
-        return reject(new Error('Error: Email sending failed.'))
-      }
-      log.info('sendRawEmail() successful.', { result })
-      resolve(true)
+
+    log.info({
+      message: 'sendMessage: Sending email via SES.',
+      originalRecipients: originalRecipients.join(', '),
+      transformedRecipients: updatedRecipients.join(', ')
     })
-  })
+
+    const result = await ses.send(new SendRawEmailCommand(params))
+    log.info({
+      message: 'sendRawEmail() successful.',
+      result
+    })
+    return true
+  } catch (err: any) {
+    log.error({
+      message: 'sendRawEmail() returned error.',
+      error: err,
+      stack: err.stack
+    })
+    throw new Error('Error: Email sending failed.')
+  }
 }
 
 /**
- * Filters out SPAM emails
- *
- * @param {SESMessage} message - SES message
- *
- * @return {Promise<boolean>} - true if email should still be sent
+ * Filters out SPAM emails.
  */
-const filterSpam = (message: SESMessage): Promise<boolean> => {
+const filterSpam = async (message: SESMessage): Promise<boolean> => {
   const receipt = message.receipt
   if (CONFIG.rejectSpam && receipt) {
     const verdicts = ['spamVerdict', 'virusVerdict', 'spfVerdict', 'dkimVerdict', 'dmarcVerdict']
-    for (let key of verdicts) {
+    for (const key of verdicts) {
       const verdict: SESReceiptStatus = receipt[key as keyof SESReceipt] as SESReceiptStatus
       if (verdict && verdict.status === 'FAIL') {
-        log.error('Error: Email failed spam filter: ' + key)
-        return Promise.reject(false)
+        log.error({
+          message: 'Error: Email failed spam filter.',
+          verdict: key
+        })
+        throw false
       }
     }
   }
-
-  return Promise.resolve(true)
+  return true
 }
 
 /**
- * Processes the message data, making updates to recipients and other headers
- * before returning the updated message.
- *
- * @param {string} originalRecipient - the original recipient
- * @param {string} messageBody - the message body
- * @return {string} - the translated message body
+ * Processes the message data, updating headers before returning the updated message.
  */
-const processMessage = (originalRecipient: string, messageBody: string): string => {
-  var match = messageBody.match(/^((?:.+\r?\n)*)(\r?\n(?:.*\s+)*)/m)
-  var header = match && match[1] ? match[1] : messageBody
-  var body = match && match[2] ? match[2] : ''
+const processMessage = (
+  originalRecipient: string,
+  messageBody: string,
+  updatedRecipients: string[] // Added parameter for forwarded recipients
+): string => {
+  const match = messageBody.match(/^((?:.+\r?\n)*)(\r?\n(?:.*\s+)*)/m)
+  let header = match && match[1] ? match[1] : messageBody
+  let body = match && match[2] ? match[2] : ''
 
-  // Add "Reply-To:" with the "From" address if it doesn't already exists
-  if (!/^reply-to:[\t ]?/im.test(header)) {
-    match = header.match(/^from:[\t ]?(.*(?:\r?\n\s+.*)*\r?\n)/im)
-    var from = match && match[1] ? match[1] : ''
-    if (from) {
-      header = header + 'Reply-To: ' + from
-      log.info('Added Reply-To address of: ' + from)
-    } else {
-      log.info('Reply-To address not added because From address was not ' + 'properly extracted.')
+  // Split headers into an array for safer manipulation
+  const headerLines = header.split(/\r?\n/).filter((line) => line.trim() !== '')
+  const updatedHeaders: string[] = []
+
+  let hasReplyTo = false
+  let fromAddress = ''
+
+  // Process headers line by line
+  for (const line of headerLines) {
+    if (/^reply-to:/i.test(line)) {
+      hasReplyTo = true
+      updatedHeaders.push(line)
+    } else if (/^from:/i.test(line)) {
+      fromAddress = line.replace(/^from:[\t ]?(.*)/i, '$1')
+      if (CONFIG.fromEmail) {
+        updatedHeaders.push(`From: ${fromAddress.replace(/<(.*)>/, '').trim()} <${CONFIG.fromEmail}>`)
+      } else {
+        updatedHeaders.push(`From: ${fromAddress.replace('<', 'at ').replace('>', '')} <${originalRecipient}>`)
+      }
+    } else if (/^to:/i.test(line)) {
+      // Replace To header with forwarded recipients
+      updatedHeaders.push(`To: ${updatedRecipients.join(', ')}`)
+    } else if (/^subject:/i.test(line) && CONFIG.subjectPrefix) {
+      updatedHeaders.push(line.replace(/^subject:[\t ]?(.*)/i, `Subject: ${CONFIG.subjectPrefix}$1`))
+    } else if (!/^(return-path|sender|message-id|dkim-signature):/i.test(line)) {
+      updatedHeaders.push(line) // Keep non-removed headers
     }
   }
 
-  // SES does not allow sending messages from an unverified address,
-  // so replace the message's "From:" header with the original
-  // recipient (which is a verified domain)
-  header = header.replace(/^from:[\t ]?(.*(?:\r?\n\s+.*)*)/gim, function (_match, from) {
-    var fromText
-    if (CONFIG.fromEmail) {
-      fromText = 'From: ' + from.replace(/<(.*)>/, '').trim() + ' <' + CONFIG.fromEmail + '>'
-    } else {
-      fromText = 'From: ' + from.replace('<', 'at ').replace('>', '') + ' <' + originalRecipient + '>'
-    }
-    return fromText
-  })
-
-  // Add a prefix to the Subject
-  if (CONFIG.subjectPrefix) {
-    header = header.replace(/^subject:[\t ]?(.*)/gim, function (match, subject) {
-      return 'Subject: ' + CONFIG.subjectPrefix + subject
-    })
+  // Add Reply-To if missing
+  if (!hasReplyTo && fromAddress) {
+    updatedHeaders.push(`Reply-To: ${fromAddress}`)
+    log.info({ message: 'Added Reply-To address', from: fromAddress })
+  } else if (!hasReplyTo) {
+    updatedHeaders.push(`Reply-To: ${originalRecipient}`)
+    log.info({ message: 'Added default Reply-To', replyTo: originalRecipient })
   }
 
-  // Remove the Return-Path header.
-  header = header.replace(/^return-path:[\t ]?(.*)\r?\n/gim, '')
+  // Add a footer to the body to clarify reply address
+  body += `\r\n\r\n---\r\nForwarded by ${CONFIG.fromEmail}. Reply to: ${fromAddress || originalRecipient}`
 
-  // Remove Sender header.
-  header = header.replace(/^sender:[\t ]?(.*)\r?\n/gim, '')
-
-  // Remove Message-ID header.
-  header = header.replace(/^message-id:[\t ]?(.*)\r?\n/gim, '')
-
-  // Remove all DKIM-Signature headers to prevent triggering an
-  // "InvalidParameterValue: Duplicate header 'DKIM-Signature'" error.
-  // These signatures will likely be invalid anyways, since the From
-  // header was modified.
-  header = header.replace(/^dkim-signature:[\t ]?.*\r?\n(\s+.*\r?\n)*/gim, '')
-
-  return header + body
+  // Ensure proper email structure with a blank line between headers and body
+  return updatedHeaders.join('\r\n') + '\r\n\r\n' + body
 }
 
 /**
  * Fetches the message data from S3.
- * @param {object} message - the SESMessage object
- * @return {string|null} - message content
  */
 const fetchMessage = async (message: SESMessage): Promise<string | null> => {
-  log.info('Fetching email at s3://' + process.env.BUCKET + '/' + CONFIG.emailKeyPrefix + message.mail.messageId)
   const Bucket = process.env.BUCKET || ''
   assert(Bucket, 'Bucket is not defined')
-  return s3
-    .getObject({
-      Bucket,
-      Key: `${CONFIG.emailKeyPrefix}${message.mail.messageId}`
+  const Key = `${CONFIG.emailKeyPrefix}${message.mail.messageId}`
+
+  log.info({
+    message: 'Fetching email from S3.',
+    bucket: Bucket,
+    key: Key
+  })
+
+  try {
+    const { Body } = await s3.send(new GetObjectCommand({ Bucket, Key }))
+    if (!Body) throw new Error('No email body found in S3')
+
+    return streamToString(Body as Readable)
+  } catch (err: any) {
+    log.error({
+      message: 'getObject() returned error.',
+      error: err,
+      stack: err.stack
     })
-    .promise()
-    .then((data) => {
-      return data.Body?.toString() ?? null
-    })
-    .catch((err) => {
-      log.error('getObject() returned error:', {
-        error: err,
-        stack: err.stack
-      })
-      return null
-    })
+    return null
+  }
 }
 
 interface RecipientsResult {
@@ -194,18 +193,14 @@ interface RecipientsResult {
 
 /**
  * Transforms the original recipients to the desired forwarded destinations.
- *
- * @param {SESMessage} message - the SESMessage object
- *
- * @return {RecipientsResult} - Recipient payload with original recipients and desired recipients.
  */
 const transformRecipients = (message: SESMessage): RecipientsResult => {
-  var newRecipients: string[] = []
+  let newRecipients: string[] = []
   let original = ''
 
   const originalRecipients = message.receipt.recipients
   originalRecipients.forEach((origEmail) => {
-    var origEmailKey = origEmail.toLowerCase()
+    let origEmailKey = origEmail.toLowerCase()
     if (CONFIG.allowPlusSign) {
       origEmailKey = origEmailKey.replace(/\+.*?@/, '@')
     }
@@ -213,9 +208,9 @@ const transformRecipients = (message: SESMessage): RecipientsResult => {
       newRecipients = newRecipients.concat(CONFIG.forwardMapping[origEmailKey])
       original = origEmail
     } else {
-      var origEmailDomain
-      var origEmailUser
-      var pos = origEmailKey.lastIndexOf('@')
+      let origEmailDomain: string | undefined
+      let origEmailUser: string | undefined
+      const pos = origEmailKey.lastIndexOf('@')
       if (pos === -1) {
         origEmailUser = origEmailKey
       } else {
@@ -236,62 +231,64 @@ const transformRecipients = (message: SESMessage): RecipientsResult => {
   })
 
   if (!newRecipients.length) {
-    log.info(
-      'Finishing process. No new recipients found for ' + 'original destinations: ' + originalRecipients.join(', ')
-    )
+    log.info({
+      message: 'Finishing process. No new recipients found.',
+      originalDestinations: originalRecipients.join(', ')
+    })
     return { original, recipients: originalRecipients }
   }
   return { original, recipients: newRecipients }
 }
 
 /**
- * Parses the SES event record provided for the `mail` and `recipients` data.
- *
- * @param {SESEvent} event - SES event record
- * @return {SESMessage} - Promise resolved with an SESMessage.
+ * Parses the SES event record provided for the mail and recipients data.
  */
-const parseEvent = (event: SESEvent): Promise<SESMessage> => {
+const parseEvent = async (event: SESEvent): Promise<SESMessage> => {
   if (
     !event ||
-    !event.hasOwnProperty('Records') ||
+    !event.Records ||
     event.Records.length !== 1 ||
-    !event.Records[0].hasOwnProperty('eventSource') ||
     event.Records[0].eventSource !== 'aws:ses' ||
     event.Records[0].eventVersion !== '1.0'
   ) {
-    log.error('parseEvent() received invalid SES message:', { event })
-    return Promise.reject(new Error('Error: Received invalid SES message.'))
+    log.error({
+      message: 'parseEvent() received invalid SES message.',
+      event
+    })
+    throw new Error('Error: Received invalid SES message.')
   }
-  return Promise.resolve(event.Records[0].ses)
+  return event.Records[0].ses
 }
 
 export const handler: SESHandler = async (event) => {
-  return parseEvent(event)
-    .then(async (message) => {
-      const { original, recipients } = transformRecipients(message)
+  try {
+    const message = await parseEvent(event)
 
-      return filterSpam(message).then((filtered) => {
-        if (filtered) {
-          return fetchMessage(message)
-            .then(async (messageBody) => {
-              assert(messageBody, 'Message body is not defined')
-              const updatedMessageBody = processMessage(original, messageBody || '')
-              return sendMessage(original, message.receipt.recipients, recipients, updatedMessageBody)
-                .then((success) => {
-                  log.info('[sendMessage]', { success })
-                })
-                .catch((err) => {
-                  log.error('[sendMessage]', { err })
-                })
-            })
-            .catch((err) => {
-              log.error('[fetchMessage]', { err })
-            })
-        }
-        return
-      })
+    const { original, recipients } = transformRecipients(message)
+
+    // Filter out spam/viruses if configured.
+    await filterSpam(message)
+
+    // Fetch the message from S3.
+    const messageBody = await fetchMessage(message)
+    assert(messageBody, 'Message body is not defined')
+
+    // Update headers/From/Reply-To, passing updated recipients.
+    const updatedMessageBody = processMessage(original, messageBody, recipients)
+
+    log.info({ message: updatedMessageBody })
+
+    // Send the transformed email.
+    await sendMessage(original, message.receipt.recipients, recipients, updatedMessageBody)
+    log.info({ message: 'Email forwarded successfully.' })
+  } catch (err) {
+    if (err === false) {
+      log.info({ message: 'Email rejected by spam filter. No forwarding performed.' })
+      return
+    }
+    log.error({
+      message: 'Error in handler.',
+      error: err
     })
-    .catch((err) => {
-      log.error('[parseEvent]', { err })
-    })
+  }
 }

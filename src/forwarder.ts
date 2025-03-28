@@ -13,6 +13,7 @@ interface ForwarderConfig {
   forwardMapping: { [key: string]: string[] }
   allowPlusSign: boolean
   rejectSpam: boolean
+  discordWebhookUrl?: string
 }
 
 const CONFIG: ForwarderConfig = {
@@ -260,10 +261,46 @@ const parseEvent = async (event: SESEvent): Promise<SESMessage> => {
   return event.Records[0].ses
 }
 
+/**
+ * Send message to Discord using a webhook.
+ */
+async function sendDiscordMessage(content: string): Promise<void> {
+  const webhookUrl = CONFIG.discordWebhookUrl ?? ''
+  const payload = {
+    content
+  }
+
+  if (webhookUrl.length > 0) {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+
+      if (!response.ok) {
+        throw new Error(`Discord webhook failed with status: ${response.status}`)
+      }
+
+      log.info({ message: 'Discord message sent successfully', content })
+    } catch (err: any) {
+      log.error({
+        message: 'Failed to send Discord message',
+        error: err.message,
+        stack: err.stack
+      })
+      throw err // Optionally rethrow if you want the Lambda to fail on Discord errors
+    }
+  }
+}
+
 export const handler: SESHandler = async (event) => {
   try {
     const message = await parseEvent(event)
 
+    // Send a Discord message with email details
+    const discordMessage = `New email received!\nFrom: ${message?.mail?.commonHeaders?.from?.join(', ')}\nTo: ${message.receipt.recipients.join(', ')}\nSubject: ${message.mail.commonHeaders.subject}`
+    await sendDiscordMessage(discordMessage)
     const { original, recipients } = transformRecipients(message)
 
     // Filter out spam/viruses if configured.
